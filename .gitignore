@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Служебное
+.workbuddy-ai/
+_selftest.txt
+
+# Прошивки и дампы flash (не часть программы)
+*.bin
