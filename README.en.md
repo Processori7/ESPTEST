@@ -16,7 +16,7 @@ ESP-IDF are not required on the machine.
 dist/ESP_TEST.exe
 ```
 
-**Version:** 1.1.0  
+**Version:** 1.0.0  
 **Interface:** Russian (default) and English — switch with the `RU | EN` toggle in the window header.
 
 ![ESP_TEST interface](screenshot_en.png)
