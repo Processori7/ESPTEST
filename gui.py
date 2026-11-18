@@ -16,6 +16,8 @@ import serial.tools.list_ports
 import chipdb
 from probe import Cancelled, EspProbe, ProbeError, list_serial_ports, usb_esp_devices
 from version import APP_NAME, __version__
+from i18n import (confirm_hint, confirm_word, get_lang, load_settings, save_settings,
+                  set_lang, tr, tr_lines, tr_tree)
 
 # ---------------------------------------------------------------------------
 # палитра и шрифты
@@ -202,7 +204,11 @@ class App(tk.Tk):
     def __init__(self, demo: bool = False):
         super().__init__()
         self.demo = demo
-        self.title(f"{APP_NAME} {__version__} — реальный объём Flash и RAM у ESP32")
+
+        cfg = load_settings()
+        set_lang(cfg.get("lang") or "ru")
+
+        self._apply_title()
         self.geometry("1200x820")
         self.minsize(1060, 720)
         self.configure(bg=C["bg"])
@@ -227,6 +233,11 @@ class App(tk.Tk):
         self._liveness_running = False
         self._tick = 0
         self._usb_hint = ""
+        self._tab = "chip"
+        self._log_lines: list[tuple] = []
+        self._status = ("не подключено", C["muted"])
+        self._connected = False
+        self._closing = False
 
         self._init_style()
         self._build()
@@ -241,6 +252,120 @@ class App(tk.Tk):
             self.after(120, self._load_demo)
         else:
             self._log("Готов к работе. Плата ищется автоматически: подключите её по USB.", "info")
+
+    # ------------------------------------------------------------------
+    # язык интерфейса
+    # ------------------------------------------------------------------
+    def _apply_title(self):
+        self.title(f"{APP_NAME} {__version__} — "
+                   + tr("реальный объём Flash и RAM у ESP32"))
+
+    def _mark_lang(self):
+        """Подсветить активный язык в переключателе."""
+        for code, lbl in getattr(self, "lang_lbls", {}).items():
+            active = code == get_lang()
+            lbl.configure(fg=C["accent"] if active else "#4a5a68",
+                          font=("Segoe UI", 8, "bold" if active else "normal"))
+
+    def _switch_lang(self, code):
+        if code == get_lang() or self._busy:
+            return
+        set_lang(code)
+        cfg = load_settings()
+        cfg["lang"] = code
+        save_settings(cfg)
+        self._rebuild()
+
+    def _rebuild(self):
+        """Пересобрать окно на другом языке, сохранив всё состояние."""
+        snap = self._snapshot()
+        for child in self.winfo_children():
+            child.destroy()
+        self.kv.clear()
+        self._build()
+        self._apply_title()
+        self._restore(snap)
+
+    def _snapshot(self) -> dict:
+        return {
+            "tab": self._tab,
+            "log": list(self._log_lines),
+            "baud": self.baud_var.get(),
+            "auto": bool(self.auto_port_var.get()),
+            "autoconn": bool(self.auto_connect_var.get()),
+            "verify": bool(self.verify_var.get()),
+            "reset": bool(self.reset_after_var.get()),
+            "backup": bool(self.backup_var.get()),
+            "offset": self.offset_var.get(),
+            "port_label": self.port_var.get(),
+            "pinned": self._pinned_device,
+            "items": list(self._port_items),
+            "bin_path": self._bin_path,
+            "status": self._status,
+            "usb_hint": self._usb_hint,
+        }
+
+    def _restore(self, s: dict):
+        self.baud_var.set(s["baud"])
+        self.auto_connect_var.set(s["autoconn"])
+        self.verify_var.set(s["verify"])
+        self.reset_after_var.set(s["reset"])
+        self.backup_var.set(s["backup"])
+        self.offset_var.set(s["offset"])
+
+        self._usb_hint = s["usb_hint"]
+        self._set_port_mode(s["auto"])
+        self._pinned_device = s["pinned"]
+        # подписи портов зависят от языка — пересобираем их заново
+        items = [self._port_text(p) for p in self._port_info.values()]
+        self._port_items = items
+        self._ports = {self._port_text(p): p["device"] for p in self._port_info.values()}
+        self.port_box["values"] = items
+        self._fill_port_list(items)
+        self.port_var.set(tr(s["port_label"]))
+        self._sync_port_list()
+        self._update_port_detail()
+
+        # данные на вкладках
+        if self.state.get("chip"):
+            self._render_chip(self.state["chip"])
+        if self.state.get("erase"):
+            self._render_erase(self.state["erase"])
+        elif self.state.get("flash"):
+            self._render_flash(self.state["flash"])
+        if self.state.get("ram"):
+            self._render_ram(self.state["ram"])
+        if self.state.get("deep"):
+            self._render_deep(self.state["deep"])
+
+        # журнал
+        self._log_lines = []
+        for msg, level in s["log"]:
+            self._log_append(msg, level)
+
+        # отчёт
+        if any(v for v in self.state.values()):
+            self._report_set(self._build_report())
+        else:
+            self._report_set("Отчёт появится после проверки.")
+
+        # состояние подключения
+        connected = self._connected
+        self.status_dot.itemconfigure(self._dot, fill=C["ok"] if connected else "#3b4a58")
+        self._set_status(s["status"][0], s["status"][1])
+        self.btn_connect.set_text(tr("Отключиться") if connected else tr("Подключиться"))
+
+        if self._bin_path:
+            try:
+                size = os.path.getsize(self._bin_path)
+            except OSError:
+                size = 0
+            self.bin_lbl.configure(
+                text=tr(f"{os.path.basename(self._bin_path)}\n{chipdb.human_size(size)}"),
+                fg=C["text"])
+
+        self._set_busy(self._busy)
+        self._set_tab(s["tab"])
 
     # ------------------------------------------------------------------
     # стили
@@ -291,6 +416,8 @@ class App(tk.Tk):
         self._build_main(body)
 
         self._build_footer()
+        tr_tree(self)
+        self._mark_lang()
 
     # -- шапка ---------------------------------------------------------
     def _build_header(self):
@@ -312,6 +439,20 @@ class App(tk.Tk):
                  font=("Segoe UI", 12, "bold")).pack(side="left")
         tk.Label(brand, text=f"v{__version__}", bg=C["bg"], fg="#4a5a68",
                  font=F_TINY).pack(side="left", padx=(6, 0), pady=(3, 0))
+
+        # переключатель языка: RU | EN
+        self.lang_lbls = {}
+        lang_box = tk.Frame(brand, bg=C["bg"])
+        lang_box.pack(side="left", padx=(12, 0), pady=(3, 0))
+        for i, (code, name) in enumerate((("ru", "RU"), ("en", "EN"))):
+            if i:
+                tk.Label(lang_box, text="|", bg=C["bg"], fg="#2b3945",
+                         font=("Segoe UI", 8)).pack(side="left", padx=3)
+            lbl = tk.Label(lang_box, text=name, bg=C["bg"], fg="#4a5a68",
+                           font=("Segoe UI", 8), cursor="hand2")
+            lbl.pack(side="left")
+            lbl.bind("<Button-1>", lambda e, c=code: self._switch_lang(c))
+            self.lang_lbls[code] = lbl
 
         right = tk.Frame(head, bg=C["bg"])
         right.grid(row=0, column=3, sticky="e")
@@ -788,6 +929,7 @@ class App(tk.Tk):
     # вкладки
     # ------------------------------------------------------------------
     def _set_tab(self, key):
+        self._tab = key
         pages = {
             "chip": self.page_chip, "flash": self.page_flash, "ram": self.page_ram,
             "report": self.page_report, "log": self.page_log,
@@ -810,9 +952,9 @@ class App(tk.Tk):
                 self._log(f"Не удалось получить список портов: {exc}", "err")
                 return
 
-        items = [p["label"] for p in ports]
-        self._ports = {p["label"]: p["device"] for p in ports}
-        self._port_info = {p["label"]: p for p in ports}
+        items = [self._port_text(p) for p in ports]
+        self._ports = {self._port_text(p): p["device"] for p in ports}
+        self._port_info = {self._port_text(p): p for p in ports}
         prev = getattr(self, "_port_items", [])
         changed = items != prev
         self._port_items = items
@@ -850,6 +992,11 @@ class App(tk.Tk):
             self._log(f"Портов: {len(items)}" + (f" ({', '.join(items)})" if items else ""))
         self._sync_port_list()
         self._update_port_detail()
+
+    @staticmethod
+    def _port_text(p) -> str:
+        """Подпись порта для показа (описание Windows переводим)."""
+        return tr(p.get("label") or p.get("device") or "")
 
     # -- список портов в боковой панели ---------------------------------
     def _fill_port_list(self, items):
@@ -891,6 +1038,8 @@ class App(tk.Tk):
     # -- автопоиск: слежение за портами и автоподключение -----------------
     def _auto_ports(self):
         """Каждые 1.5 с: проверяем, не отключилась ли плата, и ищем новую."""
+        if self._closing:
+            return
         try:
             self._tick += 1
             ports = list_serial_ports()
@@ -955,7 +1104,7 @@ class App(tk.Tk):
         self._connected_port_info = None
         self._reconnect_tried = None
         self._on_connected(False)
-        self.status_lbl.configure(text="плата отключена", fg=C["warn"])
+        self._set_status("плата отключена", C["warn"])
         if replaced:
             self._refresh_ports(quiet=True, ports=ports)
 
@@ -1019,15 +1168,15 @@ class App(tk.Tk):
             else:
                 text = "порт не выбран — нажмите строку в списке"
                 color = C["warn"]
-        self.port_detail.configure(text=text, fg=color)
+        self.port_detail.configure(text=tr(text), fg=color)
 
     def _set_port_mode(self, auto: bool):
         self.auto_port_var.set(bool(auto))
         if auto:
             self._pinned_device = None
-            self.port_mode_lbl.configure(text="ПОРТ · АВТО", fg=C["muted"])
+            self.port_mode_lbl.configure(text=tr("ПОРТ · АВТО"), fg=C["muted"])
         else:
-            self.port_mode_lbl.configure(text="ПОРТ · ВРУЧНУЮ", fg=C["accent"])
+            self.port_mode_lbl.configure(text=tr("ПОРТ · ВРУЧНУЮ"), fg=C["accent"])
 
     def _on_auto_toggle(self):
         if self.auto_port_var.get():
@@ -1091,7 +1240,7 @@ class App(tk.Tk):
         self._connected_port_info = None
         self._reconnect_tried = None
         self._on_connected(False)
-        self.status_lbl.configure(text="связь потеряна", fg=C["warn"])
+        self._set_status("связь потеряна", C["warn"])
 
     def _find_port_info(self, device):
         if not device:
@@ -1124,14 +1273,23 @@ class App(tk.Tk):
     def _log_append(self, msg, level="info"):
         if not hasattr(self, "log_text"):
             return
+        msg = str(msg)
+        self._log_lines.append((msg, level))
+        if len(self._log_lines) > 1200:
+            del self._log_lines[:200]
         self.log_text.configure(state="normal")
         self.log_text.insert("end", time.strftime("%H:%M:%S  "), "time")
-        self.log_text.insert("end", str(msg) + "\n", level)
+        self.log_text.insert("end", tr_lines(msg) + "\n", level)
         lines = int(self.log_text.index("end-1c").split(".")[0])
         if lines > 1200:
             self.log_text.delete("1.0", f"{lines - 1000}.0")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    def _set_status(self, text, fg=None):
+        """Текст состояния в шапке (храним по-русски, показываем переведённым)."""
+        self._status = (text, fg if fg is not None else self._status[1])
+        self.status_lbl.configure(text=tr(text), fg=self._status[1])
 
     def _qlog(self, msg, level="info"):
         self.queue.put(("log", msg, level))
@@ -1140,6 +1298,8 @@ class App(tk.Tk):
         self.queue.put(("progress", frac, text))
 
     def _poll(self):
+        if self._closing:
+            return
         try:
             while True:
                 msg = self.queue.get_nowait()
@@ -1148,7 +1308,7 @@ class App(tk.Tk):
                     self._log_append(msg[1], msg[2])
                 elif kind == "progress":
                     self.progress.set(msg[1])
-                    self.progress_lbl.configure(text=f"{int(msg[1] * 100)}%   {msg[2]}")
+                    self.progress_lbl.configure(text=f"{int(msg[1] * 100)}%   {tr(msg[2])}")
                 elif kind == "chip":
                     self.state["chip"] = msg[1]
                     self._render_chip(msg[1])
@@ -1176,7 +1336,7 @@ class App(tk.Tk):
                     self._set_busy(False)
                     self._log_append(msg[1], "err")
                     self._set_tab("log")
-                    messagebox.showerror("Ошибка", msg[1], parent=self)
+                    messagebox.showerror(tr("Ошибка"), tr_lines(msg[1]), parent=self)
                 elif kind == "report":
                     self._report_set(msg[1])
         except queue.Empty:
@@ -1200,7 +1360,7 @@ class App(tk.Tk):
         self.probe = None
         self._manual_disconnect = True
         self._on_connected(False)
-        self.status_lbl.configure(text="не подключено", fg=C["muted"])
+        self._set_status("не подключено", C["muted"])
         self._log("Отключено. Автоподключение возобновится при появлении новой платы.", "info")
 
     def _start(self, kind):
@@ -1244,19 +1404,19 @@ class App(tk.Tk):
         size = chipdb.human_size(flash["size_real"])
         minutes = max(1, int((flash["size_real"] / (1 << 20)) * 0.7))
         dlg = tk.Toplevel(self)
-        dlg.title("Подтверждение")
+        dlg.title(tr("Подтверждение"))
         dlg.configure(bg=C["panel"])
         dlg.transient(self)
         dlg.grab_set()
         pad = 20
-        tk.Label(dlg, text="⚠  ВНИМАНИЕ: ОПЕРАЦИЯ РАЗРУШАЮЩАЯ", bg=C["panel"], fg=C["warn"],
+        tk.Label(dlg, text=tr("⚠  ВНИМАНИЕ: ОПЕРАЦИЯ РАЗРУШАЮЩАЯ"), bg=C["panel"], fg=C["warn"],
                  font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=pad, pady=(pad, 6))
         txt = (f"Будет перезаписана вся flash ({size}): прошивка, NVS, файловая система.\n\n"
                "Перед началом программа снимет полную резервную копию и восстановит её "
                "после теста. Не отключайте плату во время работы!\n\n"
                f"Ожидаемое время: около {minutes} мин.\n\n"
                "Если восстановление прервётся, плату придётся прошивать заново.")
-        tk.Label(dlg, text=txt, bg=C["panel"], fg=C["text"], font=F_BODY, wraplength=470,
+        tk.Label(dlg, text=tr(txt), bg=C["panel"], fg=C["text"], font=F_BODY, wraplength=470,
                  justify="left").pack(anchor="w", padx=pad, pady=(0, 14))
         btns = tk.Frame(dlg, bg=C["panel"])
         btns.pack(fill="x", padx=pad, pady=(0, pad))
@@ -1266,9 +1426,9 @@ class App(tk.Tk):
             result["ok"] = True
             dlg.destroy()
 
-        RButton(btns, "Отмена", command=dlg.destroy, kind="ghost", height=34,
+        RButton(btns, tr("Отмена"), command=dlg.destroy, kind="ghost", height=34,
                 width=130, parent_bg=C["panel"]).pack(side="right", padx=(8, 0))
-        RButton(btns, "Стирать и тестировать", command=ok, kind="danger", height=34,
+        RButton(btns, tr("Стирать и тестировать"), command=ok, kind="danger", height=34,
                 width=210, parent_bg=C["panel"]).pack(side="right")
         self._center_dialog(dlg)
         self.wait_window(dlg)
@@ -1279,8 +1439,8 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     def _pick_bin(self):
         path = filedialog.askopenfilename(
-            parent=self, title="Выберите файл прошивки",
-            filetypes=[("Образ прошивки", "*.bin"), ("Все файлы", "*.*")])
+            parent=self, title=tr("Выберите файл прошивки"),
+            filetypes=[(tr("Образ прошивки"), "*.bin"), (tr("Все файлы"), "*.*")])
         if not path:
             return
         self._bin_path = path
@@ -1288,7 +1448,7 @@ class App(tk.Tk):
             size = os.path.getsize(path)
         except OSError:
             size = 0
-        self.bin_lbl.configure(text=f"{os.path.basename(path)}\n{chipdb.human_size(size)}",
+        self.bin_lbl.configure(text=tr(f"{os.path.basename(path)}\n{chipdb.human_size(size)}"),
                                fg=C["text"])
         self._log(f"Выбран файл: {path} ({chipdb.human_size(size)})", "info")
 
@@ -1296,23 +1456,24 @@ class App(tk.Tk):
         if self._busy:
             return
         if not (self.probe and self.probe.connected):
-            messagebox.showinfo("Нужно подключение", "Сначала подключитесь к плате.", parent=self)
+            messagebox.showinfo(tr("Нужно подключение"), tr("Сначала подключитесь к плате."),
+                                parent=self)
             return
         path = self._bin_path
         if not path or not os.path.isfile(path):
-            messagebox.showinfo("Файл не выбран",
-                                "Нажмите «Выбрать файл…» и укажите .bin для прошивки.",
+            messagebox.showinfo(tr("Файл не выбран"),
+                                tr("Нажмите «Выбрать файл…» и укажите .bin для прошивки."),
                                 parent=self)
             return
         try:
             offset = int(str(self.offset_var.get()).strip(), 0)
         except ValueError:
-            messagebox.showerror("Неверный адрес",
-                                 "Адрес задаётся как 0x0, 0x10000 или 0.", parent=self)
+            messagebox.showerror(tr("Неверный адрес"),
+                                 tr("Адрес задаётся как 0x0, 0x10000 или 0."), parent=self)
             return
         if offset < 0 or offset % 4:
-            messagebox.showerror("Неверный адрес",
-                                 "Адрес должен быть неотрицательным и кратным 4.", parent=self)
+            messagebox.showerror(tr("Неверный адрес"),
+                                 tr("Адрес должен быть неотрицательным и кратным 4."), parent=self)
             return
         opts = {"port": self._selected_port(), "baud": self._selected_baud(),
                 "bin": path, "offset": offset, "verify": bool(self.verify_var.get()),
@@ -1331,8 +1492,8 @@ class App(tk.Tk):
         if self._busy:
             return
         if not (self.probe and self.probe.connected):
-            messagebox.showinfo("Нужно подключение",
-                                "Сначала подключитесь к плате.", parent=self)
+            messagebox.showinfo(tr("Нужно подключение"), tr("Сначала подключитесь к плате."),
+                                parent=self)
             return
         chip = self.state.get("chip") or {}
         flash = self.state.get("flash") or {}
@@ -1350,14 +1511,15 @@ class App(tk.Tk):
     def _confirm_erase(self, chip, flash) -> bool:
         size = chipdb.human_size(flash.get("size_real")) if flash.get("size_real") else "вся"
         model = chip.get("name") or "ESP"
+        word = confirm_word()
         dlg = tk.Toplevel(self)
-        dlg.title("Подтверждение стирания")
+        dlg.title(tr("Подтверждение стирания"))
         dlg.configure(bg=C["panel"])
         dlg.transient(self)
         dlg.grab_set()
         pad = 20
 
-        tk.Label(dlg, text="⚠  ПОЛНОЕ СТИРАНИЕ FLASH", bg=C["panel"], fg=C["err"],
+        tk.Label(dlg, text=tr("⚠  ПОЛНОЕ СТИРАНИЕ FLASH"), bg=C["panel"], fg=C["err"],
                  font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=pad, pady=(pad, 6))
         txt = (f"Будет очищена вся flash ({size}) чипа {model}:\n"
                "  • загрузчик (bootloader) и таблица разделов\n"
@@ -1365,11 +1527,11 @@ class App(tk.Tk):
                "Резервная копия НЕ создаётся. После стирания плата не запустит прошивку — "
                "её нужно будет прошить заново (esptool, Arduino IDE или ESP-IDF).\n\n"
                "Не отключайте плату во время операции.")
-        tk.Label(dlg, text=txt, bg=C["panel"], fg=C["text"], font=F_BODY, wraplength=470,
+        tk.Label(dlg, text=tr(txt), bg=C["panel"], fg=C["text"], font=F_BODY, wraplength=470,
                  justify="left").pack(anchor="w", padx=pad, pady=(0, 12))
 
-        tk.Label(dlg, text="Для подтверждения введите слово СТЕРЕТЬ:", bg=C["panel"],
-                 fg=C["muted"], font=F_BODY).pack(anchor="w", padx=pad)
+        tk.Label(dlg, text=confirm_hint(),
+                 bg=C["panel"], fg=C["muted"], font=F_BODY).pack(anchor="w", padx=pad)
         var = tk.StringVar()
         entry = tk.Entry(dlg, textvariable=var, bg=C["panel2"], fg=C["text"],
                          insertbackground=C["text"], font=F_BOLD, bd=0,
@@ -1382,20 +1544,20 @@ class App(tk.Tk):
         result = {"ok": False}
 
         def ok():
-            if var.get().strip().upper() != "СТЕРЕТЬ":
+            if var.get().strip().upper() != word:
                 return
             result["ok"] = True
             dlg.destroy()
 
-        btn_ok = RButton(btns, "Стереть навсегда", command=ok, kind="danger", height=34,
+        btn_ok = RButton(btns, tr("Стереть навсегда"), command=ok, kind="danger", height=34,
                          width=190, parent_bg=C["panel"])
         btn_ok.pack(side="right", padx=(8, 0))
         btn_ok.set_enabled(False)
-        RButton(btns, "Отмена", command=dlg.destroy, kind="ghost", height=34,
+        RButton(btns, tr("Отмена"), command=dlg.destroy, kind="ghost", height=34,
                 width=120, parent_bg=C["panel"]).pack(side="right")
 
         def on_change(*_):
-            btn_ok.set_enabled(var.get().strip().upper() == "СТЕРЕТЬ")
+            btn_ok.set_enabled(var.get().strip().upper() == word)
 
         var.trace_add("write", on_change)
         entry.bind("<Return>", lambda e: ok())
@@ -1412,7 +1574,8 @@ class App(tk.Tk):
         if self._busy:
             return
         if not (self.probe and self.probe.connected):
-            messagebox.showinfo("Нужно подключение", "Сначала подключитесь к плате.", parent=self)
+            messagebox.showinfo(tr("Нужно подключение"), tr("Сначала подключитесь к плате."),
+                                parent=self)
             return
 
         def work():
@@ -1557,10 +1720,11 @@ class App(tk.Tk):
         self.queue.put(("report", self._build_report()))
 
     def _on_connected(self, value: bool):
+        self._connected = bool(value)
         self.status_dot.itemconfigure(self._dot, fill=C["ok"] if value else "#3b4a58")
-        self.status_lbl.configure(text="подключено" if value else "не подключено",
-                                  fg=C["ok"] if value else C["muted"])
-        self.btn_connect.set_text("Отключиться" if value else "Подключиться")
+        self._set_status("подключено" if value else "не подключено",
+                         C["ok"] if value else C["muted"])
+        self.btn_connect.set_text(tr("Отключиться" if value else "Подключиться"))
         if value:
             self._reconnect_tried = None
             self._manual_disconnect = False
@@ -1595,22 +1759,24 @@ class App(tk.Tk):
         self.kv["chip.name"].configure(text=info.get("name") or "—", fg=C["accent"])
         self.kv["chip.desc"].configure(text=info.get("desc") or "—")
         self.kv["chip.rev"].configure(text=f"v{info['revision']}" if info.get("revision") else "—")
-        self.kv["chip.core"].configure(text=table.get("core", "—"))
+        self.kv["chip.core"].configure(text=tr(table.get("core", "—")))
         crystal = info.get("crystal")
-        self.kv["chip.crystal"].configure(text=f"{crystal} МГц" if crystal else "—")
+        self.kv["chip.crystal"].configure(text=tr(f"{crystal} МГц") if crystal else "—")
         self.kv["chip.mac"].configure(text=info.get("mac", "—"))
         self.kv["chip.stub"].configure(
-            text="ROM + stub (полный доступ)" if info.get("stub") else "ROM (ограниченный доступ)")
+            text=tr("ROM + stub (полный доступ)" if info.get("stub")
+                    else "ROM (ограниченный доступ)"))
         self.kv["chip.port"].configure(text=info.get("port", "—"))
-        self.kv["chip.baud"].configure(text=f"{info.get('baud', 0)} бод")
+        self.kv["chip.baud"].configure(text=tr(f"{info.get('baud', 0)} бод"))
         feats = info.get("features") or "—"
         self.kv["chip.features"].configure(text=feats, wraplength=760, justify="left")
 
         sram = table.get("sram_kb")
         self.kv["chip.sram"].configure(
-            text=f"{sram} КБ" if sram else "неизвестно", fg=C["accent"] if sram else C["muted"])
-        self.kv["chip.psram"].configure(text=table.get("psram", "—"))
-        self.note_lbl.configure(text=table.get("note", ""))
+            text=tr(f"{sram} КБ") if sram else tr("неизвестно"),
+            fg=C["accent"] if sram else C["muted"])
+        self.kv["chip.psram"].configure(text=tr(table.get("psram", "—")))
+        self.note_lbl.configure(text=tr(table.get("note", "")))
 
         # --- возможности чипа ---
         caps = info.get("caps") or {}
@@ -1625,15 +1791,15 @@ class App(tk.Tk):
         note = ("Wi-Fi / Bluetooth / 802.15.4 — наличие радио в кристалле (по данным eFuse и ROM). "
                 "Живую проверку (скан сетей, сопряжение) даёт только прошивка платы: "
                 "загрузчик радио не включает.")
-        self.cap_note.configure(text=note)
+        self.cap_note.configure(text=tr(note))
 
         # --- безопасность ---
         sec = info.get("security")
         mac_check = info.get("mac_check") or {}
         if info.get("usb_vid") == 0x303A:
-            oui_text, oui_level = "Espressif · нативный USB (VID 303A)", "ok"
+            oui_text, oui_level = tr("Espressif · нативный USB (VID 303A)"), "ok"
         else:
-            oui_text = mac_check.get("text", "—")
+            oui_text = tr(mac_check.get("text", "—"))
             oui_level = mac_check.get("level", "muted")
         self.kv["sec.oui"].configure(
             text=oui_text,
@@ -1643,17 +1809,17 @@ class App(tk.Tk):
                 self.kv[key].configure(text="—", fg=C["muted"])
         else:
             self.kv["sec.boot"].configure(
-                text="ВКЛЮЧЁН" if sec.get("secure_boot") else "выключен",
+                text=tr("ВКЛЮЧЁН") if sec.get("secure_boot") else tr("выключен"),
                 fg=C["warn"] if sec.get("secure_boot") else C["muted"])
             enc = sec.get("flash_enc")
             self.kv["sec.enc"].configure(
-                text={True: "ВКЛЮЧЕНО", False: "выключено", None: "—"}[enc],
+                text=tr({True: "ВКЛЮЧЕНО", False: "выключено", None: "—"}[enc]),
                 fg=C["warn"] if enc else C["muted"])
-            self.kv["sec.jtag"].configure(text=sec.get("jtag", "—"))
+            self.kv["sec.jtag"].configure(text=tr(sec.get("jtag", "—")))
             cid = sec.get("chip_id")
             self.kv["sec.chipid"].configure(text=f"0x{cid:04X}" if cid is not None else "—")
             self.kv["sec.usb"].configure(
-                text="отключён" if sec.get("usb_disabled") else "доступен",
+                text=tr("отключён") if sec.get("usb_disabled") else tr("доступен"),
                 fg=C["warn"] if sec.get("usb_disabled") else C["muted"])
 
         if self.state.get("flash"):
@@ -1667,9 +1833,9 @@ class App(tk.Tk):
             return
         if value:
             text = f"{prefix} · {value}".strip(" ·") if prefix else str(value)
-            lbl.configure(text=text, fg=C["ok"])
+            lbl.configure(text=tr(text), fg=C["ok"])
         else:
-            lbl.configure(text=absent, fg=C["muted"])
+            lbl.configure(text=tr(absent), fg=C["muted"])
 
     def _render_app(self, app, chip):
         chip = chip or {}
@@ -1678,7 +1844,8 @@ class App(tk.Tk):
                 self.kv[key].configure(text="—", fg=C["muted"])
             return
         if not app.get("valid"):
-            self.kv["app.project"].configure(text="заголовок приложения не найден", fg=C["warn"])
+            self.kv["app.project"].configure(text=tr("заголовок приложения не найден"),
+                                             fg=C["warn"])
             for key in ("app.version", "app.idf", "app.built"):
                 self.kv[key].configure(text="—", fg=C["muted"])
             acid = app.get("chip_id")
@@ -1692,9 +1859,9 @@ class App(tk.Tk):
         rid = chip.get("image_chip_id")
         if acid is not None and rid is not None and acid != rid:
             self.kv["app.chipid"].configure(
-                text=f"0x{acid:04X} ≠ 0x{rid:04X} — образ от другого чипа!", fg=C["err"])
+                text=tr(f"0x{acid:04X} ≠ 0x{rid:04X} — образ от другого чипа!"), fg=C["err"])
         elif acid is not None:
-            self.kv["app.chipid"].configure(text=f"0x{acid:04X} — совпадает", fg=C["ok"])
+            self.kv["app.chipid"].configure(text=tr(f"0x{acid:04X} — совпадает"), fg=C["ok"])
         else:
             self.kv["app.chipid"].configure(text="—", fg=C["muted"])
 
@@ -1702,16 +1869,16 @@ class App(tk.Tk):
         self.state["flash"] = info
         real = info.get("size_real")
         declared = info.get("size_declared")
-        self.flash_big.configure(text=chipdb.human_size_short(real) if real else "—",
+        self.flash_big.configure(text=tr(chipdb.human_size_short(real)) if real else "—",
                                  fg=C["text"])
         self.flash_sub.configure(
             text=f"JEDEC {info.get('jedec_id') or '—'} · {info.get('mfg', '—')}")
 
         verdict = info.get("verdict") or {}
         level = verdict.get("level", "muted")
-        self.flash_badge.set(verdict.get("title", ""), level)
+        self.flash_badge.set(tr(verdict.get("title", "")), level)
         self.flash_verdict.configure(
-            text=verdict.get("text", ""),
+            text=tr(verdict.get("text", "")),
             fg={"ok": C["ok"], "warn": C["warn"], "err": C["err"]}.get(level, C["muted"]))
 
         top = max(filter(None, [real, declared]), default=0)
@@ -1720,88 +1887,89 @@ class App(tk.Tk):
         else:
             self.flash_bar.set(0)
         self.flash_cmp.configure(
-            text=(f"реально: {chipdb.human_size(real) if real else '—'}   ·   "
-                  f"заявлено прошивкой: {chipdb.human_size(declared) if declared else '—'}"))
+            text=tr(f"реально: {chipdb.human_size(real) if real else '—'}   ·   "
+                    f"заявлено прошивкой: {chipdb.human_size(declared) if declared else '—'}"))
 
         self.kv["fl.jedec"].configure(text=("0x" + info["jedec_id"]) if info.get("jedec_id") else "—")
-        self.kv["fl.mfg"].configure(text=info.get("mfg", "—"))
+        self.kv["fl.mfg"].configure(text=tr(info.get("mfg", "—")))
         code = info.get("cap_code")
         self.kv["fl.cap"].configure(text=f"0x{code:02X}" if code is not None else "—")
-        self.kv["fl.size_id"].configure(text=chipdb.human_size_short(info.get("size_jedec")))
-        self.kv["fl.size_det"].configure(text=chipdb.human_size_short(info.get("size_detected")))
+        self.kv["fl.size_id"].configure(text=tr(chipdb.human_size_short(info.get("size_jedec"))))
+        self.kv["fl.size_det"].configure(text=tr(chipdb.human_size_short(info.get("size_detected"))))
         sp = info.get("read_speed")
-        self.kv["fl.speed"].configure(text=f"{sp / 1024:.0f} КБ/с" if sp else "—")
+        self.kv["fl.speed"].configure(text=tr(f"{sp / 1024:.0f} КБ/с") if sp else "—")
 
         hdr = info.get("hdr_addr")
-        self.kv["fl.hdr"].configure(text=f"0x{hdr:04X} (валидный)" if hdr is not None else "не найден")
-        self.kv["fl.declared"].configure(text=chipdb.human_size_short(declared))
+        self.kv["fl.hdr"].configure(text=tr(f"0x{hdr:04X} (валидный)") if hdr is not None
+                                        else tr("не найден"))
+        self.kv["fl.declared"].configure(text=tr(chipdb.human_size_short(declared)))
         cid = info.get("hdr_chip_id")
         self.kv["fl.chipid"].configure(text=f"0x{cid:04X}" if cid is not None else "—")
-        self.kv["fl.part_total"].configure(text=chipdb.human_size_short(info.get("part_total")))
+        self.kv["fl.part_total"].configure(text=tr(chipdb.human_size_short(info.get("part_total"))))
         self.kv["fl.part_end"].configure(
             text=(f"0x{info['part_end']:06X}" if info.get("part_end") else "—"))
         pt = info.get("pt_addr")
-        self.kv["fl.pt_addr"].configure(text=f"0x{pt:04X}" if pt else "не найдена")
+        self.kv["fl.pt_addr"].configure(text=f"0x{pt:04X}" if pt else tr("не найдена"))
         self._render_app(info.get("app"), self.state.get("chip"))
 
         for child in self.part_frame.winfo_children():
             child.destroy()
         parts = info.get("partitions") or []
         if not parts:
-            tk.Label(self.part_frame, text="таблица разделов не найдена (плата не прошита?)",
+            tk.Label(self.part_frame, text=tr("таблица разделов не найдена (плата не прошита?)"),
                      bg=C["panel"], fg=C["muted"], font=F_BODY).pack(anchor="w")
         else:
             head = tk.Frame(self.part_frame, bg=C["panel"])
             head.pack(fill="x", pady=(0, 4))
             for text, width in (("Раздел", 22), ("Тип", 8), ("Смещение", 12), ("Размер", 12)):
-                tk.Label(head, text=text, bg=C["panel"], fg=C["muted"], font=F_TINY,
+                tk.Label(head, text=tr(text), bg=C["panel"], fg=C["muted"], font=F_TINY,
                          width=width, anchor="w").pack(side="left")
             for p in parts[:20]:
                 row = tk.Frame(self.part_frame, bg=C["panel"])
                 row.pack(fill="x")
                 tk.Label(row, text=p["label"], bg=C["panel"], fg=C["text"], font=F_MONO,
                          width=22, anchor="w").pack(side="left")
-                tk.Label(row, text=p["type"], bg=C["panel"], fg=C["muted"], font=F_MONO,
+                tk.Label(row, text=tr(p["type"]), bg=C["panel"], fg=C["muted"], font=F_MONO,
                          width=8, anchor="w").pack(side="left")
                 tk.Label(row, text=f"0x{p['offset']:06X}", bg=C["panel"], fg=C["text"],
                          font=F_MONO, width=12, anchor="w").pack(side="left")
-                tk.Label(row, text=chipdb.human_size_short(p["size"]), bg=C["panel"],
+                tk.Label(row, text=tr(chipdb.human_size_short(p["size"])), bg=C["panel"],
                          fg=C["text"], font=F_MONO, width=12, anchor="w").pack(side="left")
 
     def _render_ram(self, info: dict):
         self.state["ram"] = info
         table = (self.state.get("chip") or {}).get("table") or {}
         sram = table.get("sram_kb")
-        self.ram_big.configure(text=f"{sram} КБ" if sram else "—")
+        self.ram_big.configure(text=tr(f"{sram} КБ") if sram else "—")
 
         if not info.get("available"):
-            self.ram_badge.set("не проверено", "warn")
-            self.ram_sub.configure(text=info.get("note") or "тест недоступен")
+            self.ram_badge.set(tr("не проверено"), "warn")
+            self.ram_sub.configure(text=tr(info.get("note") or "тест недоступен"))
         else:
             data_ok = info.get("data_ok")
             addr_ok = info.get("addr_ok")
             good = bool(data_ok) and bool(addr_ok)
-            self.ram_badge.set("SRAM работает" if good else "ошибки чтения/записи",
+            self.ram_badge.set(tr("SRAM работает" if good else "ошибки чтения/записи"),
                                "ok" if good else "err")
-            self.ram_sub.configure(
-                text="объём задан моделью чипа; ниже — проверка целостности ячеек")
+            self.ram_sub.configure(text=tr(
+                "объём задан моделью чипа; ниже — проверка целостности ячеек"))
 
         base = info.get("base")
         self.kv["ram.base"].configure(text=f"0x{base:08X}" if base else "—")
         self.kv["ram.cells"].configure(text=str(info.get("cells") or "—"))
         self.kv["ram.data"].configure(
-            text={True: "OK", False: "ОШИБКА", None: "—"}[info.get("data_ok")],
+            text=tr({True: "OK", False: "ОШИБКА", None: "—"}[info.get("data_ok")]),
             fg={True: C["ok"], False: C["err"], None: C["muted"]}[info.get("data_ok")])
         self.kv["ram.addr"].configure(
-            text={True: "OK", False: "ОШИБКА", None: "—"}[info.get("addr_ok")],
+            text=tr({True: "OK", False: "ОШИБКА", None: "—"}[info.get("addr_ok")]),
             fg={True: C["ok"], False: C["err"], None: C["muted"]}[info.get("addr_ok")])
         errors = info.get("errors") or []
         self.ram_err.configure(text="\n".join(errors[:6]) if errors else "")
 
-        self.ram_psram.configure(text=table.get("psram", "—"))
+        self.ram_psram.configure(text=tr(table.get("psram", "—")))
         no_psram = "нет интерфейса" in (table.get("psram") or "")
         self.ram_psram_note.configure(
-            text=("В этом чипе внешняя PSRAM не поддерживается аппаратно — проверять нечего."
+            text=tr("В этом чипе внешняя PSRAM не поддерживается аппаратно — проверять нечего."
                   if no_psram else
                   "PSRAM нельзя измерить через ROM-загрузчик: она не инициализирована до запуска "
                   "прошивки. Точный объём PSRAM показывает сама прошивка (esp_psram_get_size) или "
@@ -1829,19 +1997,19 @@ class App(tk.Tk):
         if res.get("write_speed"):
             text += (f"\nСкорость: запись {res['write_speed'] / 1024:.0f} КБ/с, "
                      f"чтение {(res.get('read_speed') or 0) / 1024:.0f} КБ/с")
-        self.deep_lbl.configure(text=text, fg=color)
+        self.deep_lbl.configure(text=tr_lines(text), fg=color)
         self._set_tab("flash")
 
     def _render_erase(self, res: dict):
         """Показать, что плата осталась без прошивки."""
         self.state["flash"] = None
         self.state["deep"] = None
-        self.flash_big.configure(text="стёрта", fg=C["warn"])
-        self.flash_sub.configure(text="микросхема очищена полностью — прошивки на плате нет")
-        self.flash_badge.set("flash пуста", "warn")
+        self.flash_big.configure(text=tr("стёрта"), fg=C["warn"])
+        self.flash_sub.configure(text=tr("микросхема очищена полностью — прошивки на плате нет"))
+        self.flash_badge.set(tr("flash пуста"), "warn")
         self.flash_verdict.configure(
-            text=("Все данные удалены (загрузчик, разделы, NVS). Чтобы плата снова работала, "
-                  "прошейте её: esptool write_flash, Arduino IDE или ESP-IDF."),
+            text=tr("Все данные удалены (загрузчик, разделы, NVS). Чтобы плата снова работала, "
+                    "прошейте её: esptool write_flash, Arduino IDE или ESP-IDF."),
             fg=C["warn"])
         self.flash_bar.set(0)
         self.flash_cmp.configure(text="")
@@ -1853,7 +2021,7 @@ class App(tk.Tk):
                 self.kv[key].configure(text="—")
         for child in self.part_frame.winfo_children():
             child.destroy()
-        tk.Label(self.part_frame, text="flash стёрта — таблицы разделов больше нет",
+        tk.Label(self.part_frame, text=tr("flash стёрта — таблицы разделов больше нет"),
                  bg=C["panel"], fg=C["muted"], font=F_BODY).pack(anchor="w")
         self._set_tab("flash")
 
@@ -1863,7 +2031,7 @@ class App(tk.Tk):
     def _report_set(self, text):
         self.report_text.configure(state="normal")
         self.report_text.delete("1.0", "end")
-        self.report_text.insert("1.0", text)
+        self.report_text.insert("1.0", tr_lines(text))
         self.report_text.configure(state="disabled")
 
     def _build_report(self) -> str:
@@ -1874,7 +2042,7 @@ class App(tk.Tk):
         table = chip.get("table") or {}
         L = []
         L.append("=" * 66)
-        L.append("  ESP-32 MEMORY INSPECTOR — ОТЧЁТ О ПРОВЕРКЕ ПАМЯТИ")
+        L.append("  ESP_TEST — ОТЧЁТ О ПРОВЕРКЕ ПАМЯТИ")
         L.append("=" * 66)
         L.append(f"Дата: {time.strftime('%d.%m.%Y %H:%M:%S')}")
         L.append("")
@@ -1979,15 +2147,15 @@ class App(tk.Tk):
                 L.append(f"    {e}")
         L.append("")
         L.append("=" * 66)
-        return "\n".join(L)
+        return "\n".join(tr(line) for line in L)
 
     def _save_report(self):
         text = self._build_report()
         path = filedialog.asksaveasfilename(
-            parent=self, title="Сохранить отчёт",
+            parent=self, title=tr("Сохранить отчёт"),
             defaultextension=".txt",
             initialfile=f"esp32_memory_report_{time.strftime('%Y%m%d_%H%M')}.txt",
-            filetypes=[("Текстовый файл", "*.txt"), ("Все файлы", "*.*")])
+            filetypes=[(tr("Текстовый файл"), "*.txt"), (tr("Все файлы"), "*.*")])
         if not path:
             return
         try:
@@ -1995,14 +2163,14 @@ class App(tk.Tk):
                 fh.write(text)
             self._log(f"Отчёт сохранён: {path}", "ok")
         except Exception as exc:
-            messagebox.showerror("Ошибка", f"Не удалось сохранить: {exc}", parent=self)
+            messagebox.showerror(tr("Ошибка"), tr(f"Не удалось сохранить: {exc}"), parent=self)
 
     # ------------------------------------------------------------------
     # демо-режим
     # ------------------------------------------------------------------
     def _load_demo(self):
         self._on_connected(True)
-        self.status_lbl.configure(text="демо-режим", fg=C["warn"])
+        self._set_status("демо-режим", C["warn"])
         features = ["Wi-Fi", "BT 5 (LE)", "Dual Core + LP Core", "240MHz", "Embedded PSRAM 8MB"]
         self._render_chip({
             "name": "ESP32-S3",
@@ -2050,6 +2218,7 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------
     def _on_close(self):
+        self._closing = True
         self.cancel_flag.set()
         if self.probe:
             try:

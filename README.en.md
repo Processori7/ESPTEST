@@ -1,5 +1,10 @@
 # ESP_TEST
 
+**Documentation language / Язык документации:**
+**🇬🇧 English (you are here)** · **[🇷🇺 Русский — README.md](README.md)**
+
+---
+
 A tool that measures the **real** memory size of ESP32 boards (ESP32, S2, S3, C2, C3, C5, C6, H2,
 P4, ESP8266): flash and SRAM. It can also flash any `.bin`, fully erase the chip, and run a
 destructive full-flash test with an automatic backup.
@@ -11,12 +16,10 @@ ESP-IDF are not required on the machine.
 dist/ESP_TEST.exe
 ```
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
+**Interface:** Russian (default) and English — switch with the `RU | EN` toggle in the window header.
 
-🇷🇺 Русская версия: [README.md](README.md)
-
-> The user interface is in Russian; the button names below are given as «Russian label» (English
-> meaning).
+![ESP_TEST interface](screenshot_en.png)
 
 ---
 
@@ -49,7 +52,7 @@ that "over a COM port".
 | Verdict | "capacity confirmed" / "claims more than it has" (typical on cheap modules) / "claims less" |
 
 ### Flashing any .bin
-The **«Прошить .bin»** (Flash .bin) block: "Выбрать файл…" (Choose file) button, an address field
+The **FLASH .BIN** block: the **Choose file…** button, an address field
 (`0x0` by default) and the "Прошить файл" (Flash file) button.
 
 * works with any image: a merged image at `0x0`, separate `bootloader.bin` / `partitions.bin` /
@@ -57,9 +60,9 @@ The **«Прошить .bin»** (Flash .bin) block: "Выбрать файл…"
 * the address may be written as `0x10000`, `65536` or `0`; if it is not sector-aligned (4096) the
   tool rounds it down and pads the gap with `0xFF`, saying so in the log;
 * a file that does not fit into flash at the given address is rejected with a clear error;
-* **«Проверять»** (Verify) — after writing, the image is read back and compared byte by byte; the
+* **Verify** — after writing, the image is read back and compared byte by byte; the
   first mismatching block is reported;
-* **«Перезагрузить»** (Reboot) — reset the board after writing. Clear it to flash several files in
+* **Reboot** — reset the board after writing. Clear it to flash several files in
   a row (bootloader → partitions → app) and then press "Сбросить плату (RST)" once;
 * after flashing a full image at `0x0` the flash identity is re-read automatically.
 
@@ -67,12 +70,12 @@ Speed on an ESP32-C3 over native USB is about 360 KB/s: a 2.2 MB image takes rou
 and about as long to verify.
 
 ### Erasing flash (complete, irreversible)
-**«Стереть flash полностью»** (Erase flash completely) wipes the whole chip: bootloader, partition
+**Erase flash completely** wipes the whole chip: bootloader, partition
 table, application, NVS, file system and coredump.
 
 * no backup is made — the data is gone for good;
-* confirmation must be typed by hand: the word `СТЕРЕТЬ` (ERASE), the button stays disabled until
-  it matches;
+* confirmation must be typed by hand: the word `ERASE` (in the Russian UI — `СТЕРЕТЬ`), the button
+  stays disabled until it matches;
 * after erasing, the tool reads the beginning of flash back and checks that it really is `0xFF`,
   then resets the board and closes the session;
 * if **Secure Boot** or flash encryption is enabled, the loader refuses to erase — the tool reports
@@ -105,36 +108,45 @@ Do not unplug the board while it runs.
 
 ---
 
+## Interface language
+
+The UI is **Russian by default**; click `EN` in the header (next to the version number) to switch
+to English, `RU` to switch back. The choice is remembered in
+`%APPDATA%\ESP_TEST\settings.json` and applied on the next start. Everything is translated:
+tabs, buttons, hints, log lines, the report and the erase confirmation word (`ERASE`).
+
+---
+
 ## How to use it
 
 1. Connect the board with a USB cable (a data cable, not a charge-only one).
 2. Start `ESP_TEST.exe` — **the board is found and connected automatically**.
 3. The port list is polled every 1.5 s: a board plugged in after start appears in the list and is
-   selected automatically (USB ports first, the motherboard's COM1 last). The "Подключаться
-   автоматически" (Connect automatically) checkbox turns auto-connect off.
-4. **Manual port selection**: every detected port is listed in the «Соединение» (Connection) block.
-   Click a row (or pick a port in the header drop-down) — the mode switches to `ПОРТ · ВРУЧНУЮ`
-   (PORT · MANUAL), autodetection is disabled and the tool works only with that port. If the chosen
+   selected automatically (USB ports first, the motherboard's COM1 last). The **Connect automatically**
+   checkbox turns auto-connect off.
+4. **Manual port selection**: every detected port is listed in the **CONNECTION** block.
+   Click a row (or pick a port in the header drop-down) — the mode switches to `PORT · MANUAL`,
+   autodetection is disabled and the tool works only with that port. If the chosen
    board disappears and comes back, the tool reconnects to exactly that one and never touches other
-   boards. To go back, tick "Искать плату на всех портах" (Search all ports).
+   boards. To go back, tick **Search the board on all ports**.
 5. **Hot swap**: unplug one board, plug in another — the tool notices the port disappearing (or a
    different VID:PID on the same COM), closes the session, finds the new board and connects to it.
    Every ~7 s a silent liveness probe runs, which also catches a board swapped behind the same COM
    number.
-6. If there are no ports at all, the «Соединение» block states the reason: either "no Espressif /
+6. If there are no ports at all, the **CONNECTION** block states the reason: either "no Espressif /
    USB-UART device in the system" (cable, port, power) or "USB device `VID:PID` is present but no
    COM port was created" (USB-UART driver missing).
 7. Tabs: **Чип** (Chip) — model, capabilities, security, firmware; **Flash** — flash identity and
    verdict; **ОЗУ** (RAM) — SRAM test; **Отчёт** (Report) — ready text plus a "Save report" button;
    **Журнал** (Log) — what is happening right now.
-8. The **«Прошить .bin»** and **«Стереть прошивку»** blocks flash any image and wipe the chip
+8. The **FLASH .BIN** and **ERASE FIRMWARE** blocks flash any image and wipe the chip
    completely (see above).
 
 The **⟳** button forces a port list refresh.
 
 If the automatic download-mode entry fails: hold **BOOT**, press and release **EN/RST**, release
 **BOOT**, then press "Подключиться" (Connect). The speed can be lowered to 115200 in the
-«Соединение» block.
+**CONNECTION** block.
 
 ### Demo mode
 `ESP_TEST.exe --demo` — the full UI with data from a virtual ESP32-S3 board, no hardware needed
@@ -179,6 +191,8 @@ type dist\_selftest.txt
 | `gui.py` | Tkinter UI (dark theme, custom buttons, cards, gauges) |
 | `probe.py` | hardware layer via esptool: chip, flash, erase, `.bin` flashing, deep test, SRAM |
 | `chipdb.py` | reference data: SRAM per model, flash manufacturers, density codes, Espressif OUIs |
+| `i18n.py` | RU → EN translation dictionary and language switching (settings in `%APPDATA%`) |
+| `version.py` | application name and version in one place |
 | `build.py` | single-exe build and icon generation |
 
 ---
